@@ -1,32 +1,41 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE NamedFieldPuns #-}
 
+import Control.Monad.Except (ExceptT, runExceptT)
+import Data.Map.Strict (Map)
+import Data.Path ((</>), (<.>))
 import ElmArchitecture (Config(_init, _update, Config), Cmd)
 import Prelude hiding (init, log)
-import System.Path (RelFile, RelDir, relDir, relFile, toString, takeDirectory, combine, dirFromFile, (</>), (<.>))
+import qualified Data.Hash as Hash
 import qualified Data.Map.Strict as Map
-import Data.Map.Strict (Map)
+import qualified Data.Path as Path
+import qualified Effect.Compile as Compile
+import qualified Effect.CompileSpec as CompileSpec
 import qualified ElmArchitecture
-import qualified Hash
-import Control.Monad.Except (ExceptT)
-import Control.Exception (IOException)
-import Control.Error (hoistEither)
-import Control.Monad.IO.Class (liftIO)
-import Data.Either.Combinators (rightToMaybe)
-import qualified Data.ByteString.Lazy as Lazy
-import qualified Data.ByteString as Strict
-import Control.Exception (IOException, try)
-import Text.Printf (printf)
-import Data.Char (chr)
-import Data.ByteString.Internal (unpackChars)
+import Debug.Trace
+
+-- |
+-- | MODEL
+-- |
+
+data Job = Job { taskId :: TaskId
+               , task :: Task
+               , depends :: [TaskId]
+               } deriving (Show)
 
 data Model =
-  Model { nofTasks :: Int
-        , maxNofTasks :: Int
-        , buildDir :: RelDir
-        , sourceHash :: Map RelFile String
+  Model { maxNofTasks :: Int
+        , buildDir :: Path.BuildDir
+        , pending :: [Job]
+        , inProgress :: [Job]
+        , completed :: [TaskId]
         } deriving (Show)
+
+-- |
+-- | EVENTS
+-- |
 
 data LogLevel
   = Debug
@@ -35,86 +44,100 @@ data LogLevel
   | Error
   deriving (Show)
 
-newtype SourceFile = SourceFile RelFile deriving (Show)
-newtype ObjectFile = ObjectFile RelFile deriving (Show)
-newtype DependFile = DependFile RelFile deriving (Show)
-newtype ChecksumFile = ChecksumFile RelFile deriving (Show)
-newtype SourceHash = SourceHash String deriving (Show)
-newtype DependHash = DependHash String deriving (Show)
+newtype TaskId = TaskId Int deriving (Show, Eq)
+
+data Task
+  = Compile Path.SourceFile
+  deriving (Show)
 
 data Msg
   = Noop
-  | Log LogLevel String
-  | Compile SourceFile ObjectFile SourceHash
+  | AddTask Job
+  | FinalizeTask Job
   | FatalError String
   deriving (Show)
 
-srcToObj :: Model -> SourceFile -> SourceHash -> ObjectFile
-srcToObj model (SourceFile src) (SourceHash hash) =
-  ObjectFile $ combine (buildDir model) $ dirFromFile src </> relFile hash <.> ".o"
+compile :: Job -> Path.BuildDir -> Path.SourceFile -> IO Msg
+compile job buildDir sourceFile = do
+  spec <- runExceptT $ CompileSpec.make buildDir sourceFile
+  case spec of
+    Left err -> return $ FatalError $ show err
+    Right mspec -> case mspec of
+      Nothing -> return $ FinalizeTask job
+      Just spec -> do
+        result <- runExceptT $ Compile.compile spec
+        case result of
+          Left err    -> return $ FatalError $ show err
+          Right False -> return $ FatalError "compilation failed"          
+          Right True  -> return $ FinalizeTask job
 
-srcToDep :: Model -> SourceFile -> SourceHash -> DependFile
-srcToDep model (SourceFile src) (SourceHash hash) =
-  DependFile $ combine (buildDir model) $ dirFromFile src </> relFile hash <.> ".d"
+runTask :: Job -> Model -> (Model, Cmd Msg)
+runTask job model = (model', cmds)
+  where model' = model { inProgress = (inProgress model) <> [job] }
+        cmds = case (task job) of
+          Compile sourceFile -> [compile job (buildDir model) sourceFile]  
 
-srcToChecksum :: Model -> SourceFile -> SourceHash -> ChecksumFile
-srcToChecksum model (SourceFile src) (SourceHash hash) =
-  ChecksumFile $ combine (buildDir model) $ dirFromFile src </> relFile hash <.> ".k"
-
-dependHash :: DependFile -> IO (Maybe String)
-dependHash (DependFile dependPath) = do
-  dependHash' <- Hash.hashFile (toString dependPath)
-  return $ rightToMaybe dependHash' >>= return . Hash.toHex
-
-readChecksum :: ChecksumFile -> IO (Maybe String)
-readChecksum (ChecksumFile checksumPath) = do
-  checksum <- try (Strict.readFile $ toString checksumPath):: IO (Either IOException Strict.ByteString)
-  pure $ rightToMaybe checksum >>= pure . unpackChars
-
-initiateCompilation' :: Model -> SourceFile -> ExceptT IOException IO Msg
-initiateCompilation' model (SourceFile src) = do
-  sourceHash' <- liftIO $ Hash.hashFile (toString src)
-  sourceHash <- hoistEither $ sourceHash' >>= return . Hash.toHex
-
-  let dependFile = srcToDep model (SourceFile src) (SourceHash sourceHash)
-  let checksumFile = srcToChecksum model (SourceFile src) (SourceHash sourceHash)
-
-  r <- liftIO $ (<>) <$> dependHash dependFile <*> readChecksum checksumFile
-  case r of
-    Just h -> liftIO $ putStrLn ("Found hash " <> h)
-    Nothing -> liftIO $ putStrLn "Couldn't find hash"
-  --dependHash <- hoistEither $ 
-  pure Noop
-
-initiateCompilation :: Model -> SourceFile -> IO Msg
-initiateCompilation model (SourceFile src) = do
-  sourceHash' <- Hash.hashFile (toString src)
-  case sourceHash' of
-    Left err ->
-      return $ FatalError $ show err
-    Right contents -> do
-      let sourceFile = SourceFile src
-      let sourceHash = SourceHash $ Hash.toHex contents
-
-      let (DependFile dependFile) = srcToDep model (SourceFile src) sourceHash
-      dependHash' <- Hash.hashFile (toString dependFile)
-
-      let objectFile = srcToObj model (SourceFile src) sourceHash
-
-      return $ Compile sourceFile objectFile sourceHash
-
-needsRecompile :: Model -> SourceFile -> ObjectFile -> SourceHash -> IO Msg
-needsRecompile model (SourceFile src) (ObjectFile object) (SourceHash sourceHash) = do
-  --dependPath = srcToDep :: Model -> SourceFile -> 
-  --depend <- Hash.hashFile ()
-  pure Noop
+deferTask :: Job -> Model -> (Model, Cmd Msg)
+deferTask job model = (model', [])
+  where  model' = model { pending = (pending model) <> [job] }
+      
+finalizeTask :: Job -> Model -> (Model, Cmd Msg)
+finalizeTask job model = (model'', cmds)
+  where model' =  model { inProgress = filter ((/=) (taskId job) . taskId) (inProgress model)
+                        , completed = (completed model) <> [taskId job] }
+        (model'', cmds) = case pending model of
+          (x:xs) -> (model' { pending = xs }, [return $ AddTask job])
+          _      -> (model', [])
 
 update :: Msg -> Model -> (Model, Cmd Msg)
 update msg model = do
   case msg of
-    Noop -> (model, [])
-    Compile source object sourceHash -> (model, [])
-    FatalError msg -> (model, [])
+    Noop ->
+      (model, [])
+
+    AddTask job ->
+      if (length $ inProgress model) < (maxNofTasks model) then
+        runTask job model
+      else
+        deferTask job model
+
+    FinalizeTask taskId ->
+      finalizeTask taskId model
+      
+    FatalError msg ->
+      (model, [])
+
+
+
+
+addCompileTask :: TaskId -> [TaskId] -> Path.SourceFile -> IO Msg
+addCompileTask taskId depends sourceFile = pure $ AddTask $ Job {taskId, depends, task = Compile sourceFile}
+
+initialCmds :: Cmd Msg
+initialCmds =
+  [ addCompileTask (TaskId 1) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test" <.> "cpp")
+  , addCompileTask (TaskId 2) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test2" <.> "cpp")
+  , addCompileTask (TaskId 3) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test3" <.> "cpp")
+  , addCompileTask (TaskId 4) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test4" <.> "cpp")
+  , addCompileTask (TaskId 5) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test5" <.> "cpp")
+  , addCompileTask (TaskId 6) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test6" <.> "cpp")
+  , addCompileTask (TaskId 7) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test7" <.> "cpp")
+  , addCompileTask (TaskId 8) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test8" <.> "cpp")      
+  ]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -132,15 +155,12 @@ updateWithLog update msg model = case msg of
 
 initialModel :: Model
 initialModel =
-  Model { nofTasks = 0
-        , maxNofTasks = 8
-        , buildDir = relDir "build"
-        , sourceHash = Map.empty
+  Model { maxNofTasks = 4
+        , buildDir = Path.BuildDir $ Path.relDir "build"
+        , pending = []
+        , inProgress = []
+        , completed = []
         }
-
-initialCmds :: Cmd Msg
-initialCmds =
-  [initiateCompilation initialModel (SourceFile $ relDir "cpp" </> relFile "test" <.> "cpp")]
 
 main :: IO ()
 main = ElmArchitecture.run

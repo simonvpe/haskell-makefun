@@ -30,6 +30,9 @@ dependencies:
 - mtl
 - errors
 - either
+- typed-process
+- directory
+- random
 
 library:
   source-dirs: src
