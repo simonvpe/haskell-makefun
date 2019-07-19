@@ -2,10 +2,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 import Control.Monad.Except (ExceptT, runExceptT)
+import Control.Lens hiding ((:>), at, (<.>), _init)
 import Data.Map.Strict (Map)
 import Data.Path ((</>), (<.>))
+import Data.List (delete, (\\))
 import ElmArchitecture (Config(_init, _update, Config), Cmd)
 import Prelude hiding (init, log)
 import qualified Data.Hash as Hash
@@ -20,18 +23,25 @@ import Debug.Trace
 -- | MODEL
 -- |
 
-data Job = Job { taskId :: TaskId
-               , task :: Task
-               , depends :: [TaskId]
-               } deriving (Show)
+data Task
+  = Compile Path.SourceFile
+  | LinkStaticLibrary [Path.SourceFile] Path.StaticLibraryFile
+  deriving (Show, Eq)
+
+newtype TaskId = TaskId Int deriving (Show, Eq)
+
+data Job = Job { _taskId :: TaskId, _task :: Task, _depends :: [TaskId] } deriving (Show, Eq)
 
 data Model =
-  Model { maxNofTasks :: Int
-        , buildDir :: Path.BuildDir
-        , pending :: [Job]
-        , inProgress :: [Job]
-        , completed :: [TaskId]
+  Model { _maxNofTasks :: Int
+        , _buildDir :: Path.BuildDir
+        , _pending :: [Job]
+        , _inProgress :: [Job]
+        , _completed :: [TaskId]
         } deriving (Show)
+
+makeLenses ''Job
+makeLenses ''Model
 
 -- |
 -- | EVENTS
@@ -42,12 +52,6 @@ data LogLevel
   | Info
   | Warning
   | Error
-  deriving (Show)
-
-newtype TaskId = TaskId Int deriving (Show, Eq)
-
-data Task
-  = Compile Path.SourceFile
   deriving (Show)
 
 data Msg
@@ -71,23 +75,16 @@ compile job buildDir sourceFile = do
           Right False -> return $ FatalError "compilation failed"          
           Right True  -> return $ FinalizeTask job
 
-runTask :: Job -> Model -> (Model, Cmd Msg)
-runTask job model = (model', cmds)
-  where model' = model { inProgress = (inProgress model) <> [job] }
-        cmds = case (task job) of
-          Compile sourceFile -> [compile job (buildDir model) sourceFile]  
+linkStaticLibrary :: Job -> Path.BuildDir -> [Path.SourceFile] -> Path.StaticLibraryFile -> IO Msg
+linkStaticLibrary job buildDir sources (Path.StaticLibraryFile library) = do
+  putStrLn $ "Linking " <> (show $ (\(Path.SourceFile s) -> Path.toString s) <$> sources) <> " -> " <> (show $ Path.toString library)
+  return $ FinalizeTask job
 
-deferTask :: Job -> Model -> (Model, Cmd Msg)
-deferTask job model = (model', [])
-  where  model' = model { pending = (pending model) <> [job] }
-      
-finalizeTask :: Job -> Model -> (Model, Cmd Msg)
-finalizeTask job model = (model'', cmds)
-  where model' =  model { inProgress = filter ((/=) (taskId job) . taskId) (inProgress model)
-                        , completed = (completed model) <> [taskId job] }
-        (model'', cmds) = case pending model of
-          (x:xs) -> (model' { pending = xs }, [return $ AddTask job])
-          _      -> (model', [])
+runJob :: Job -> Model -> Cmd Msg
+runJob job model =
+  case job^.task of
+    Compile sourceFile               -> [compile job (model^.buildDir) sourceFile]
+    LinkStaticLibrary sources library -> [linkStaticLibrary job (model^.buildDir) sources library]
 
 update :: Msg -> Model -> (Model, Cmd Msg)
 update msg model = do
@@ -96,14 +93,19 @@ update msg model = do
       (model, [])
 
     AddTask job ->
-      if (length $ inProgress model) < (maxNofTasks model) then
-        runTask job model
+      if (model^.inProgress^.to length) < (model^.maxNofTasks) && (job^.depends^.to length) == 0 then
+        (inProgress %~ ((++) [job]) $ model, runJob job model)
       else
-        deferTask job model
+        (pending %~ ((++) [job]) $ model, [])
 
-    FinalizeTask taskId ->
-      finalizeTask taskId model
-      
+    FinalizeTask job -> do
+      let pendingRevised = (depends %~ (delete $ job^.taskId)) <$> model^.pending
+      let model' = pending .~ []
+                   $ inProgress %~ (delete job)
+                   $ completed %~ ((++) [job^.taskId])
+                   $ model
+      (model', return . AddTask <$> pendingRevised)
+  
     FatalError msg ->
       (model, [])
 
@@ -111,7 +113,10 @@ update msg model = do
 
 
 addCompileTask :: TaskId -> [TaskId] -> Path.SourceFile -> IO Msg
-addCompileTask taskId depends sourceFile = pure $ AddTask $ Job {taskId, depends, task = Compile sourceFile}
+addCompileTask _taskId _depends sourceFile = pure $ AddTask $ Job {_taskId, _depends, _task = Compile sourceFile}
+
+addLinkStaticLibraryTask :: TaskId -> [TaskId] -> IO Msg
+addLinkStaticLibraryTask _taskId _depends = pure $ AddTask $ Job {_taskId, _depends, _task = LinkStaticLibrary [] $ Path.StaticLibraryFile (Path.relDir "build" </> Path.relFile "lib" <.> "a")}
 
 initialCmds :: Cmd Msg
 initialCmds =
@@ -119,10 +124,12 @@ initialCmds =
   , addCompileTask (TaskId 2) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test2" <.> "cpp")
   , addCompileTask (TaskId 3) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test3" <.> "cpp")
   , addCompileTask (TaskId 4) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test4" <.> "cpp")
-  , addCompileTask (TaskId 5) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test5" <.> "cpp")
-  , addCompileTask (TaskId 6) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test6" <.> "cpp")
-  , addCompileTask (TaskId 7) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test7" <.> "cpp")
-  , addCompileTask (TaskId 8) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test8" <.> "cpp")      
+  , addLinkStaticLibraryTask (TaskId 5) ([TaskId 10] <> (TaskId <$> [1, 2, 3, 4]))
+  , addCompileTask (TaskId 6) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test5" <.> "cpp")
+  , addCompileTask (TaskId 7) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test6" <.> "cpp")
+  , addCompileTask (TaskId 8) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test7" <.> "cpp")
+  , addCompileTask (TaskId 9) [] (Path.SourceFile $ Path.relDir "cpp" </> Path.relFile "test8" <.> "cpp")
+  , addLinkStaticLibraryTask (TaskId 10) (TaskId <$> [6, 7, 8, 9])  
   ]
 
 
@@ -155,11 +162,11 @@ updateWithLog update msg model = case msg of
 
 initialModel :: Model
 initialModel =
-  Model { maxNofTasks = 4
-        , buildDir = Path.BuildDir $ Path.relDir "build"
-        , pending = []
-        , inProgress = []
-        , completed = []
+  Model { _maxNofTasks = 4
+        , _buildDir = Path.BuildDir $ Path.relDir "build"
+        , _pending = []
+        , _inProgress = []
+        , _completed = []
         }
 
 main :: IO ()

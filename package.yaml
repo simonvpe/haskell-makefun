@@ -33,6 +33,7 @@ dependencies:
 - typed-process
 - directory
 - random
+- lens
 
 library:
   source-dirs: src

@@ -4,6 +4,7 @@ module Data.Path
   , ObjectFile(..)
   , DependFile(..)
   , ChecksumFile(..)
+  , StaticLibraryFile(..)
   , srcToObj
   , srcToDep
   , srcToChecksum
@@ -15,11 +16,12 @@ import Prelude
 import System.Path (RelFile, RelDir, relDir, relFile, toString, takeDirectory, combine, dirFromFile, (</>), (<.>))
 import Data.Hash (SourceHash(..))
 
-newtype BuildDir = BuildDir RelDir deriving (Show)
-newtype SourceFile = SourceFile RelFile deriving (Show)
-newtype ObjectFile = ObjectFile RelFile deriving (Show)
-newtype DependFile = DependFile RelFile deriving (Show)
-newtype ChecksumFile = ChecksumFile RelFile deriving (Show)
+newtype BuildDir = BuildDir RelDir deriving (Show, Eq)
+newtype SourceFile = SourceFile RelFile deriving (Show, Eq)
+newtype ObjectFile = ObjectFile RelFile deriving (Show, Eq)
+newtype DependFile = DependFile RelFile deriving (Show, Eq)
+newtype ChecksumFile = ChecksumFile RelFile deriving (Show, Eq)
+newtype StaticLibraryFile = StaticLibraryFile RelFile deriving (Show, Eq)
 
 srcToObj :: BuildDir -> SourceFile -> SourceHash -> ObjectFile
 srcToObj (BuildDir buildDir) (SourceFile src) (SourceHash hash) =
