@@ -34,6 +34,8 @@ dependencies:
 - directory
 - random
 - lens
+- makefile
+- text
 
 library:
   source-dirs: src

@@ -70,10 +70,10 @@ compile job buildDir sourceFile = do
     Right mspec -> case mspec of
       Nothing -> return $ FinalizeTask job
       Just spec -> do
-        result <- runExceptT $ Compile.compile spec
+        result <- runExceptT $ Compile.compile DependencyParser.parse spec
         case result of
           Left err    -> return $ FatalError $ show err
-          Right False -> return $ FatalError "compilation failed"          
+          Right False -> return $ FatalError "compilation failed"
           Right True  -> return $ FinalizeTask job
 
 linkStaticLibrary :: Job -> Path.BuildDir -> [Path.SourceFile] -> Path.StaticLibraryFile -> IO Msg
@@ -173,4 +173,4 @@ initialModel =
 main :: IO ()
 main = ElmArchitecture.run
   Config { _init = (initialModel, initialCmds)
-         , _update = updateWithLog update }
+         , _update = update }

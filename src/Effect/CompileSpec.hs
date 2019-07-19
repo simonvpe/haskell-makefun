@@ -34,14 +34,16 @@ readDependencies parse (Path.DependFile dependPath) = do
 hashDependencies :: [Path.HeaderFile] -> IO (String)
 hashDependencies headerPaths' = do
   results <- traverse Hash.hashFile headerPaths
-  let checksums = catMaybes $ (>>= return . unpackChars) <$> results >>= return . rightToMaybe
+  let checksums = catMaybes $ (>>= return . Hash.toHex) <$> results >>= return . rightToMaybe
   pure $ foldl (++) "" checksums
   where headerPaths = Path.toString <$> (\(Path.HeaderFile x) -> x) <$> headerPaths'
 
-readDependHash :: Path.DependFile -> IO (Maybe Hash.DependHash)
-readDependHash (Path.DependFile dependPath) = do
+readDependHash :: (String -> Either String [Path.HeaderFile]) -> Path.DependFile -> IO (Maybe Hash.DependHash)
+readDependHash parse (Path.DependFile dependPath) = do
   dependHash <- Hash.hashFile (Path.toString dependPath)
-  return $ rightToMaybe dependHash >>= return . Hash.DependHash .  Hash.toHex
+  headerHash <- readDependencies parse (Path.DependFile dependPath) >>= hashDependencies
+  return $ ((++) <$> (rightToMaybe dependHash >>= return . Hash.toHex) <*> (Just headerHash))
+    >>= return . Hash.DependHash
 
 readSourceHash :: Path.SourceFile -> ExceptT IOException IO Hash.SourceHash
 readSourceHash (Path.SourceFile sourcePath) = do
@@ -62,13 +64,10 @@ make :: (String -> Either String [Path.HeaderFile]) -> Path.BuildDir -> Path.Sou
 make parse buildDir (Path.SourceFile src) = do
   sourceHash' <- readSourceHash (Path.SourceFile src)
   let dependFile' = Path.srcToDep buildDir (Path.SourceFile src) sourceHash'
-  dependHash <- liftIO $ readDependHash dependFile'
-  headerHash <- liftIO $ readDependencies parse dependFile' >>= hashDependencies
+  dependHash <- liftIO $ readDependHash parse dependFile'
   let checksumFile' = Path.srcToChecksum buildDir (Path.SourceFile src) sourceHash'
   storedChecksum <- liftIO $ readChecksum checksumFile'
-  let calculatedChecksum = Hash.calculateChecksum
-        <$> (Just sourceHash')
-        <*> ((\(Hash.DependHash a) b -> Hash.DependHash (a ++ b)) <$> dependHash <*> Just headerHash)
+  let calculatedChecksum = Hash.calculateChecksum <$> (Just sourceHash') <*> dependHash
   let (Path.ObjectFile objectFile') = Path.srcToObj buildDir (Path.SourceFile src) sourceHash'
   let checksumMatches = (==) <$> calculatedChecksum <*> storedChecksum
   objectExists <- liftIO $ doesFileExist $ Path.toString objectFile'
