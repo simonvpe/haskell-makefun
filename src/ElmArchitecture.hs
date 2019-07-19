@@ -20,7 +20,7 @@ data Config model msg =
            , _update :: msg -> model -> (model, Cmd msg)
            }
 
-run :: forall model msg. Config model msg -> IO ()
+run :: forall model msg. Show model => Config model msg -> IO ()
 run config = do
   initAsyncs <- traverse async initCmds
   run' initAsyncs initModel
@@ -31,7 +31,7 @@ run config = do
     run' :: [Async msg] -> model -> IO ()
     run' asyncs model =
       if null asyncs then
-        print "Finished"
+        putStrLn $ show model
       else do
         -- This works like a pool of async commands with a queue
         -- in the end. The first command to be resolved is the first

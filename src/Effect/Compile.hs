@@ -32,7 +32,7 @@ compile parse spec = do
 
   liftIO $ putStrLn $ show $ [cmd] <> args
   exitCode <- (liftIO $ try $ runProcess $ proc cmd args) >>= hoistEither
-
+  _ <- runProcess $ proc "sync" []
   --us <- liftIO $ randomRIO (1000000, 10000000 :: Int)
   --_ <- liftIO $ threadDelay us
 

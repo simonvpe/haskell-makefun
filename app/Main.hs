@@ -12,6 +12,7 @@ import Data.Path ((</>), (<.>))
 import Data.List (delete, (\\))
 import ElmArchitecture (Config(_init, _update, Config), Cmd)
 import Prelude hiding (init, log)
+import Control.Concurrent (threadDelay)
 import qualified Data.Hash as Hash
 import qualified Data.Map.Strict as Map
 import qualified Data.Path as Path
@@ -61,8 +62,9 @@ data LogLevel
 
 data Msg
   = Noop
+  | Keepalive
   | AddTask Job
-  | FinalizeTask Job
+  | FinalizeTask Job Msg
   | FatalError String
   | AddObject Path.SourceFile Path.ObjectFile
   | Many [Msg]
@@ -74,14 +76,13 @@ compile job buildDir sourceFile = do
   case spec of
     Left err -> return $ FatalError $ show err
     Right mspec -> case mspec of
-      Nothing -> return $ FinalizeTask job
+      Nothing -> return $ FinalizeTask job Noop
       Just spec -> do
         result <- runExceptT $ Compile.compile DependencyParser.parse spec
         case result of
           Left err    -> return $ FatalError $ show err
           Right False -> return $ FatalError "compilation failed"
-          Right True  -> return . Many $ [AddObject (CompileSpec.sourceFile spec) (CompileSpec.objectFile spec)
-                                         , FinalizeTask job ]
+          Right True  -> return . FinalizeTask job $ AddObject (CompileSpec.sourceFile spec) (CompileSpec.objectFile spec)
 
 linkStaticLibrary :: Job -> Path.BuildDir -> [Path.ObjectFile] -> Path.StaticLibraryFile -> IO Msg
 linkStaticLibrary job buildDir objectPaths library = do
@@ -90,7 +91,7 @@ linkStaticLibrary job buildDir objectPaths library = do
   case result of
     Left err -> return $ FatalError $ show err
     Right False -> return $ FatalError "linking failed"
-    Right True -> return $ FinalizeTask job
+    Right True -> return $ FinalizeTask job Noop
 
 linkExecutable :: Job -> Path.BuildDir -> [Path.ObjectFile] -> Path.ExecutableFile -> IO Msg
 linkExecutable job buildDir objectPaths executable = do
@@ -99,23 +100,33 @@ linkExecutable job buildDir objectPaths executable = do
   case result of
     Left err -> return $ FatalError $ show err
     Right False -> return $ FatalError "linking failed"
-    Right True -> return $ FinalizeTask job
+    Right True -> return $ FinalizeTask job Noop
 
-runJob :: Job -> Model -> Cmd Msg
+runJob :: Job -> Model -> IO Msg
 runJob job model =
   case job^.task of
     Compile sourceFile ->
-      [compile job (model^.buildDir) sourceFile]
+      compile job (model^.buildDir) sourceFile
 
     LinkStaticLibrary sources library -> do
       case sequence $ flip Map.lookup (model^.objects) <$> sources of
-        Just objectPaths -> [linkStaticLibrary job (model^.buildDir) objectPaths library]
-        Nothing -> [pure $ FatalError "missing object file"]
+        Just objectPaths -> linkStaticLibrary job (model^.buildDir) objectPaths library
+        Nothing -> pure $ FatalError "missing object file"
 
     LinkExecutable sources executable -> do
       case sequence $ flip Map.lookup (model^.objects) <$> sources of
-        Just objectPaths -> [linkExecutable job (model^.buildDir) objectPaths executable]
-        Nothing -> [pure $ FatalError "missing object file"]
+        Just objectPaths -> linkExecutable job (model^.buildDir) objectPaths executable
+        Nothing -> pure $ FatalError "missing object file"
+
+shutDown :: IO Msg
+shutDown = do
+  putStrLn "Shutting down!"
+  pure $ Noop
+
+-- keepalive :: IO Msg
+-- kkepalize = do
+--   _ <- threadDelay 10000.0
+--   pure $ Keepalive
 
 update :: Msg -> Model -> (Model, Cmd Msg)
 update msg model = do
@@ -123,19 +134,27 @@ update msg model = do
     Noop ->
       (model, [])
 
+    -- Keepalive -> if model^.inProgress
+    --   (model, [keepalive])
+
     AddTask job ->
       if (model^.inProgress^.to length) < (model^.maxNofTasks) && (job^.depends^.to length) == 0 then
-        (inProgress %~ ((++) [job]) $ model, runJob job model)
+        (inProgress %~ ((++) [job]) $ model, [runJob job model])
       else
         (pending %~ ((++) [job]) $ model, [])
 
-    FinalizeTask job -> do
-      let pendingRevised = (depends %~ (delete $ job^.taskId)) <$> model^.pending
-      let model' = pending .~ []
+    FinalizeTask job msg -> do
+      let (model', cmds) = update msg model -- immediate fold of this message
+          pendingRevised = (depends %~ (delete $ job^.taskId)) <$> model'^.pending
+          n = (model'^.maxNofTasks) - (model'^.inProgress.to length) + 1
+          ready = filter (\x -> x^.depends.to length == 0) pendingRevised
+          notReady = pendingRevised \\ ready
+          model'' = pending .~ (drop n ready <> notReady)
                    $ inProgress %~ (delete job)
                    $ completed %~ ((++) [job^.taskId])
-                   $ model
-      (model', return . AddTask <$> pendingRevised)
+                   $ model'
+          cmds' = flip runJob model'' <$> take n ready
+      (model'', cmds <> cmds')
 
     AddObject src obj -> do
       (objects %~ (Map.insert src obj) $ model, [])
@@ -144,7 +163,7 @@ update msg model = do
       (model, return <$> msgs)
 
     FatalError msg ->
-      (model, [])
+      (pending .~ [] $ inProgress .~ [] $ model, [shutDown])
 
 
 
@@ -209,7 +228,7 @@ initialCmds =
 log :: LogLevel -> Msg -> Model -> IO (Msg)
 log level msg model = do
   putStrLn $ show msg
-  putStrLn $ show model
+  --putStrLn $ show model
   return Noop
 
 updateWithLog :: (Msg -> Model -> (Model, Cmd Msg)) -> Msg -> Model -> (Model, Cmd Msg)
@@ -221,7 +240,7 @@ updateWithLog update msg model = case msg of
 
 initialModel :: Model
 initialModel =
-  Model { _maxNofTasks = 4
+  Model { _maxNofTasks = 8
         , _buildDir = Path.BuildDir $ Path.relDir "build"
         , _pending = []
         , _inProgress = []
@@ -232,4 +251,4 @@ initialModel =
 main :: IO ()
 main = ElmArchitecture.run
   Config { _init = (initialModel, initialCmds)
-         , _update = update }
+         , _update = updateWithLog update }
