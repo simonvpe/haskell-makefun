@@ -6,6 +6,7 @@ module Data.Path
   , ChecksumFile(..)
   , StaticLibraryFile(..)
   , HeaderFile(..)
+  , ExecutableFile(..)
   , srcToObj
   , srcToDep
   , srcToChecksum
@@ -17,13 +18,14 @@ import Prelude
 import System.Path (RelFile, RelDir, relDir, relFile, toString, takeDirectory, combine, dirFromFile, (</>), (<.>))
 import Data.Hash (SourceHash(..))
 
-newtype BuildDir = BuildDir RelDir deriving (Show, Eq)
-newtype SourceFile = SourceFile RelFile deriving (Show, Eq)
-newtype ObjectFile = ObjectFile RelFile deriving (Show, Eq)
-newtype DependFile = DependFile RelFile deriving (Show, Eq)
-newtype HeaderFile = HeaderFile RelFile deriving (Show, Eq)
-newtype ChecksumFile = ChecksumFile RelFile deriving (Show, Eq)
-newtype StaticLibraryFile = StaticLibraryFile RelFile deriving (Show, Eq)
+newtype BuildDir = BuildDir RelDir deriving (Show, Eq, Ord)
+newtype SourceFile = SourceFile RelFile deriving (Show, Eq, Ord)
+newtype ObjectFile = ObjectFile RelFile deriving (Show, Eq, Ord)
+newtype DependFile = DependFile RelFile deriving (Show, Eq, Ord)
+newtype HeaderFile = HeaderFile RelFile deriving (Show, Eq, Ord)
+newtype ChecksumFile = ChecksumFile RelFile deriving (Show, Eq, Ord)
+newtype StaticLibraryFile = StaticLibraryFile RelFile deriving (Show, Eq, Ord)
+newtype ExecutableFile = ExecutableFile RelFile deriving (Show, Eq, Ord)
 
 srcToObj :: BuildDir -> SourceFile -> SourceHash -> ObjectFile
 srcToObj (BuildDir buildDir) (SourceFile src) (SourceHash hash) =
