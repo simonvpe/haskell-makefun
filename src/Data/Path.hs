@@ -5,6 +5,7 @@ module Data.Path
   , DependFile(..)
   , ChecksumFile(..)
   , StaticLibraryFile(..)
+  , HeaderFile(..)
   , srcToObj
   , srcToDep
   , srcToChecksum
@@ -20,6 +21,7 @@ newtype BuildDir = BuildDir RelDir deriving (Show, Eq)
 newtype SourceFile = SourceFile RelFile deriving (Show, Eq)
 newtype ObjectFile = ObjectFile RelFile deriving (Show, Eq)
 newtype DependFile = DependFile RelFile deriving (Show, Eq)
+newtype HeaderFile = HeaderFile RelFile deriving (Show, Eq)
 newtype ChecksumFile = ChecksumFile RelFile deriving (Show, Eq)
 newtype StaticLibraryFile = StaticLibraryFile RelFile deriving (Show, Eq)
 

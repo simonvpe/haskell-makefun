@@ -17,6 +17,7 @@ import qualified Data.Path as Path
 import qualified Effect.Compile as Compile
 import qualified Effect.CompileSpec as CompileSpec
 import qualified ElmArchitecture
+import qualified Toolchain.Gcc.DependencyParser as DependencyParser
 import Debug.Trace
 
 -- |
@@ -63,7 +64,7 @@ data Msg
 
 compile :: Job -> Path.BuildDir -> Path.SourceFile -> IO Msg
 compile job buildDir sourceFile = do
-  spec <- runExceptT $ CompileSpec.make buildDir sourceFile
+  spec <- runExceptT $ CompileSpec.make DependencyParser.parse buildDir sourceFile
   case spec of
     Left err -> return $ FatalError $ show err
     Right mspec -> case mspec of

@@ -13,12 +13,30 @@ import Control.Monad.Except (ExceptT)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString.Internal (unpackChars)
 import Data.CompileSpec
+import Data.Either (Either)
 import Data.Either.Combinators (rightToMaybe)
+import Data.Maybe (catMaybes)
 import System.Directory (doesFileExist)
 import qualified Data.ByteString as Strict
 import qualified Data.ByteString.Lazy as Lazy
 import qualified Data.Path as Path
 import qualified Effect.Hash as Hash
+
+readDependencies :: (String -> Either String [Path.HeaderFile]) -> Path.DependFile -> IO [Path.HeaderFile]
+readDependencies parse (Path.DependFile dependPath) = do
+  content <- try $ Lazy.readFile $ Path.toString dependPath :: IO (Either IOException Lazy.ByteString)
+  case content of
+    Left _ -> pure []
+    Right content' -> case parse $ unpackChars $ Lazy.toStrict content' of
+      Left _ -> pure []
+      Right headers -> pure headers
+
+hashDependencies :: [Path.HeaderFile] -> IO (String)
+hashDependencies headerPaths' = do
+  results <- traverse Hash.hashFile headerPaths
+  let checksums = catMaybes $ (>>= return . unpackChars) <$> results >>= return . rightToMaybe
+  pure $ foldl (++) "" checksums
+  where headerPaths = Path.toString <$> (\(Path.HeaderFile x) -> x) <$> headerPaths'
 
 readDependHash :: Path.DependFile -> IO (Maybe Hash.DependHash)
 readDependHash (Path.DependFile dependPath) = do
@@ -39,24 +57,26 @@ writeChecksum :: Path.ChecksumFile -> Hash.ObjectChecksum -> ExceptT IOException
 writeChecksum (Path.ChecksumFile path) (Hash.ObjectChecksum checksum) = do
   r <- liftIO $ try $ writeFile (Path.toString path) checksum
   hoistEither $ r
-  
 
-make :: Path.BuildDir -> Path.SourceFile -> ExceptT IOException IO (Maybe CompileSpec)
-make buildDir (Path.SourceFile src) = do
-  sourceHash <- readSourceHash (Path.SourceFile src)
-  let dependFile = Path.srcToDep buildDir (Path.SourceFile src) sourceHash
-  dependHash <- liftIO $ readDependHash dependFile
-  let checksumFile = Path.srcToChecksum buildDir (Path.SourceFile src) sourceHash
-  storedChecksum <- liftIO $ readChecksum checksumFile
-  let calculatedChecksum = Hash.calculateChecksum <$> (Just sourceHash) <*> dependHash
-  let (Path.ObjectFile objectFile) = Path.srcToObj buildDir (Path.SourceFile src) sourceHash
+make :: (String -> Either String [Path.HeaderFile]) -> Path.BuildDir -> Path.SourceFile -> ExceptT IOException IO (Maybe CompileSpec)
+make parse buildDir (Path.SourceFile src) = do
+  sourceHash' <- readSourceHash (Path.SourceFile src)
+  let dependFile' = Path.srcToDep buildDir (Path.SourceFile src) sourceHash'
+  dependHash <- liftIO $ readDependHash dependFile'
+  headerHash <- liftIO $ readDependencies parse dependFile' >>= hashDependencies
+  let checksumFile' = Path.srcToChecksum buildDir (Path.SourceFile src) sourceHash'
+  storedChecksum <- liftIO $ readChecksum checksumFile'
+  let calculatedChecksum = Hash.calculateChecksum
+        <$> (Just sourceHash')
+        <*> ((\(Hash.DependHash a) b -> Hash.DependHash (a ++ b)) <$> dependHash <*> Just headerHash)
+  let (Path.ObjectFile objectFile') = Path.srcToObj buildDir (Path.SourceFile src) sourceHash'
   let checksumMatches = (==) <$> calculatedChecksum <*> storedChecksum
-  objectExists <- liftIO $ doesFileExist $ Path.toString objectFile
+  objectExists <- liftIO $ doesFileExist $ Path.toString objectFile'
   pure $ case (&&) <$> (Just objectExists) <*> checksumMatches  of
     Just True -> Nothing
     _         -> Just $ CompileSpec { sourceFile   = (Path.SourceFile src)
-                                    , objectFile   = (Path.ObjectFile objectFile)
-                                    , dependFile   = dependFile
-                                    , checksumFile = checksumFile
-                                    , sourceHash   = sourceHash
+                                    , objectFile   = (Path.ObjectFile objectFile')
+                                    , dependFile   = dependFile'
+                                    , checksumFile = checksumFile'
+                                    , sourceHash   = sourceHash'
                                     }
