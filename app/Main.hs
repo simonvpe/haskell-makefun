@@ -75,14 +75,17 @@ compile job buildDir sourceFile = do
   spec <- runExceptT $ CompileSpec.make DependencyParser.parse buildDir sourceFile
   case spec of
     Left err -> return $ FatalError $ show err
-    Right mspec -> case mspec of
-      Nothing -> return $ FinalizeTask job Noop
-      Just spec -> do
-        result <- runExceptT $ Compile.compile DependencyParser.parse spec
-        case result of
-          Left err    -> return $ FatalError $ show err
-          Right False -> return $ FatalError "compilation failed"
-          Right True  -> return . FinalizeTask job $ AddObject (CompileSpec.sourceFile spec) (CompileSpec.objectFile spec)
+    Right mspec -> do
+      let cmd = AddObject (CompileSpec.sourceFile mspec) (CompileSpec.objectFile mspec)
+      if CompileSpec.rebuildRequired mspec
+        then do
+          result <- runExceptT $ Compile.compile DependencyParser.parse mspec
+          case result of
+            Left err    -> return $ FatalError $ show err
+            Right False -> return $ FatalError "compilation failed"
+            Right True  -> return $ FinalizeTask job $ cmd
+        else
+          return $ FinalizeTask job $ cmd
 
 linkStaticLibrary :: Job -> Path.BuildDir -> [Path.ObjectFile] -> Path.StaticLibraryFile -> IO Msg
 linkStaticLibrary job buildDir objectPaths library = do

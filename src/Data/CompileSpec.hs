@@ -1,4 +1,4 @@
-module Data.CompileSpec (CompileSpec(CompileSpec, sourceFile, objectFile, dependFile, checksumFile, sourceHash)) where
+module Data.CompileSpec (CompileSpec(..)) where
 
 import qualified Data.Hash as Hash
 import qualified Data.Path as Path
@@ -9,4 +9,5 @@ data CompileSpec =
               , dependFile :: Path.DependFile
               , checksumFile :: Path.ChecksumFile
               , sourceHash :: Hash.SourceHash
+              , rebuildRequired :: Bool
               } deriving (Show)

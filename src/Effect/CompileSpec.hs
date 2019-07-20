@@ -1,5 +1,5 @@
 module Effect.CompileSpec
-  ( CompileSpec(sourceFile, objectFile, dependFile, checksumFile, sourceHash)
+  ( CompileSpec(..)
   , make
   , readDependHash
   , writeChecksum
@@ -60,7 +60,7 @@ writeChecksum (Path.ChecksumFile path) (Hash.ObjectChecksum checksum) = do
   r <- liftIO $ try $ writeFile (Path.toString path) checksum
   hoistEither $ r
 
-make :: (String -> Either String [Path.HeaderFile]) -> Path.BuildDir -> Path.SourceFile -> ExceptT IOException IO (Maybe CompileSpec)
+make :: (String -> Either String [Path.HeaderFile]) -> Path.BuildDir -> Path.SourceFile -> ExceptT IOException IO CompileSpec
 make parse buildDir (Path.SourceFile src) = do
   sourceHash' <- readSourceHash (Path.SourceFile src)
   let dependFile' = Path.srcToDep buildDir (Path.SourceFile src) sourceHash'
@@ -71,11 +71,13 @@ make parse buildDir (Path.SourceFile src) = do
   let (Path.ObjectFile objectFile') = Path.srcToObj buildDir (Path.SourceFile src) sourceHash'
   let checksumMatches = (==) <$> calculatedChecksum <*> storedChecksum
   objectExists <- liftIO $ doesFileExist $ Path.toString objectFile'
-  pure $ case (&&) <$> (Just objectExists) <*> checksumMatches  of
-    Just True -> Nothing
-    _         -> Just $ CompileSpec { sourceFile   = (Path.SourceFile src)
-                                    , objectFile   = (Path.ObjectFile objectFile')
-                                    , dependFile   = dependFile'
-                                    , checksumFile = checksumFile'
-                                    , sourceHash   = sourceHash'
-                                    }
+  pure $ CompileSpec
+    { sourceFile   = (Path.SourceFile src)
+    , objectFile   = (Path.ObjectFile objectFile')
+    , dependFile   = dependFile'
+    , checksumFile = checksumFile'
+    , sourceHash   = sourceHash'
+    , rebuildRequired = case (&&) <$> (Just objectExists) <*> checksumMatches  of
+        Just True -> False
+        _         -> True
+    }
